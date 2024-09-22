@@ -1,5 +1,5 @@
 CC = gcc
-COMMON_FLAGS = -g
+COMMON_FLAGS = -g -O2 -Wall
 OPENSSL_INCLUDES = -I/home/jhpark/.local/ssl/include
 LIBS = /home/jhpark/.local/ssl/lib64/libssl.a /home/jhpark/.local/ssl/lib64/libcrypto.a -lpthread
 
