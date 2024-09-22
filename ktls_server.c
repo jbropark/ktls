@@ -121,7 +121,13 @@ int create_socket()
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
         perror("Unable to create socket");
-        exit(1);
+        exit(EXIT_FAILURE);
+    }
+
+    const int enable = 1;
+    if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
     }
 
     addr.sin_family = AF_INET;
@@ -316,16 +322,6 @@ int main(int argc, char **argv)
     configure_server_context(ssl_ctx);
 
     int server_skt = create_socket();
-
-    const int enable = 1;
-    if (setsockopt(server_skt, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
-        perror("setsockopt failed");
-        exit(EXIT_FAILURE);
-    }
-    if (setsockopt(server_skt, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0) {
-        perror("setsockopt failed");
-        exit(EXIT_FAILURE);
-    }
 
     while (server_running) {
         client_skt = accept(server_skt, (struct sockaddr *)&addr, &addr_len);
