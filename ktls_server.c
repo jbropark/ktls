@@ -10,6 +10,7 @@
 #include <netinet/tcp.h>
 #include <linux/tls.h>
 #include <time.h>
+#include <signal.h>
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 #include <linux/sockios.h>
@@ -21,6 +22,8 @@
 
 static const int SERVER_PORT = 4433;
 static const int BUFFER_SIZE = 8931;
+
+static volatile bool server_running = true;
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end)
 {
@@ -189,6 +192,90 @@ static void configure_server_context(SSL_CTX *ctx)
     SSL_CTX_set_verify_depth(ctx, 1);
 }
 
+void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer)
+{
+    struct timespec start, end;
+
+    ssize_t bytes_sent = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (size_t i = 0; i < n_packets; i++) {
+        ssize_t sent = send(client_skt, buffer, BUFFER_SIZE, 0);
+
+        if (sent <= 0) {
+            perror("write failed");
+            break;
+        }
+
+        bytes_sent += sent;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    if (bytes_sent > 0) {
+        measure_speed(bytes_sent, start, end);
+    }
+
+    close(client_skt);
+}
+
+void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer)
+{
+    SSL *ssl = SSL_new(ssl_ctx);
+    struct timespec start, end;
+
+    if (SSL_set_fd(ssl, client_skt) == 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    if (SSL_accept(ssl) <= 0) {
+        ERR_print_errors_fp(stderr);
+        exit(EXIT_FAILURE);
+    }
+
+    printf("Client SSL connection accepted\n");
+    int version = SSL_version(ssl);
+    const char *version_str = SSL_get_version(ssl);
+
+    printf("TLS Version: %s\n", version_str);
+
+    const char *cipher_suite = SSL_get_cipher(ssl);
+    printf("Cipher Suite: %s\n", cipher_suite);
+
+    enable_ktls(ssl, client_skt);
+    ssize_t bytes_sent = 0;
+
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    for (size_t i = 0; i < n_packets; i++) {
+        ssize_t sent = SSL_write(ssl, buffer, BUFFER_SIZE);
+
+        if (sent <= 0) {
+            perror("write failed");
+            break;
+        }
+
+        bytes_sent += sent;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    if (bytes_sent > 0) {
+        measure_speed(bytes_sent, start, end);
+    }
+
+    SSL_shutdown(ssl);
+    SSL_free(ssl);
+    close(client_skt);
+}
+
+int server_skt = -1;
+
+void quit_server(int sig)
+{
+    server_running = false;
+    close(server_skt);
+    server_skt = -1;
+}
+
 int main(int argc, char **argv)
 {
     if (argc != 2) {
@@ -198,18 +285,14 @@ int main(int argc, char **argv)
 
     size_t n_packets = strtoull(argv[1], NULL, 10);
 
-    static volatile bool server_running = true;
-    int server_skt = -1;
     int client_skt = -1;
     struct sockaddr_in addr;
     unsigned int addr_len = sizeof(addr);
 
-    SSL_CTX *ssl_ctx = NULL;
-    SSL *ssl = NULL;
+    signal(SIGPIPE, SIG_IGN);
+    signal(SIGINT, quit_server);
 
-    ssize_t bytes_sent = 0;
-    long long int remain_size; // remaining size at send socket buffer
-    struct timespec start, end;
+    SSL_CTX *ssl_ctx = NULL;
 
     char *buffer = (char *)calloc(sizeof(char), BUFFER_SIZE);
     if (buffer == NULL) {
@@ -254,55 +337,16 @@ int main(int argc, char **argv)
         }
 
         // Close the server socket in the child process
-        close(server_skt);
-
-        ssl = SSL_new(ssl_ctx);
-        if (SSL_set_fd(ssl, client_skt) == 0) {
-            ERR_print_errors_fp(stderr);
-            exit(EXIT_FAILURE);
+        if (server_skt != -1) {
+            close(server_skt);
         }
 
-        if (SSL_accept(ssl) <= 0) {
-            ERR_print_errors_fp(stderr);
-            exit(EXIT_FAILURE);
-        }
+        handle_tcp(ssl_ctx, client_skt, n_packets, buffer);
 
-        printf("Client SSL connection accepted\n");
-        int version = SSL_version(ssl);
-        const char *version_str = SSL_get_version(ssl);
-
-        printf("TLS Version: %s\n", version_str);
-
-        const char *cipher_suite = SSL_get_cipher(ssl);
-        printf("Cipher Suite: %s\n", cipher_suite);
-
-        enable_ktls(ssl, client_skt);
-
-        clock_gettime(CLOCK_MONOTONIC, &start);
-        for (size_t i = 0; i < n_packets; i++) {
-            ssize_t sent = SSL_write(ssl, buffer, BUFFER_SIZE);
-
-            if (sent <= 0) {
-                perror("write failed");
-                break;
-            }
-
-            bytes_sent += sent;
-        }
-        clock_gettime(CLOCK_MONOTONIC, &end);
-
-        if (bytes_sent > 0) {
-            measure_speed(bytes_sent, start, end);
-        }
-
-        SSL_shutdown(ssl);
-        SSL_free(ssl);
-        close(client_skt);
         exit(0); // Child process exits
     }
 
     printf("Server exiting...\n");
-    close(server_skt);
     SSL_CTX_free(ssl_ctx);
     free(buffer);
 

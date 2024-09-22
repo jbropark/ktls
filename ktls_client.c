@@ -22,14 +22,14 @@ static const int SERVER_PORT = 4433;
 static const size_t BUFFER_SIZE = 1 * 1024 * 1024;
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end) {
-    double elapsed_time_sec, elapsed_time_ms, elapsed_time_us;
-    double speed_mbps;
+    // double elapsed_time_sec, elapsed_time_ms, elapsed_time_us;
+    // double speed_mbps;
 
-    elapsed_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    elapsed_time_ms = elapsed_time_sec * 1000;
-    elapsed_time_us = elapsed_time_sec * 1e6;
+    double elapsed_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double elapsed_time_ms = elapsed_time_sec * 1000;
+    // elapsed_time_us = elapsed_time_sec * 1e6;
 
-    speed_mbps = ((bytes_sent * 8) / 1000000.0) / elapsed_time_sec;
+    // speed_mbps = ((bytes_sent * 8) / 1000000.0) / elapsed_time_sec;
 
     // printf("Total data sent: %zd bytes\n", bytes_sent);
     // printf("Elapsed time: %.6f seconds\n", elapsed_time_sec);
@@ -40,7 +40,6 @@ void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end
 
 int create_socket() {
     int s;
-    struct sockaddr_in addr;
 
     s = socket(AF_INET, SOCK_STREAM, 0);
     if (s < 0) {
@@ -119,13 +118,73 @@ size_t validate_online(char *buf)
     return count;
 }
 
-void handle_connection(char *server_ip) {
+
+void* handle_tcp(void *arg) {
+    char *server_ip = (char*)arg;
     int client_skt = -1;
     struct sockaddr_in addr;
-    unsigned int addr_len = sizeof(addr);
+
+    fix_affinity(0);
+
+    char *buffer = malloc(BUFFER_SIZE);
+    if (buffer == NULL) {
+        perror("Failed to allocate memory for buffer");
+        exit(1);
+    }
+
+    ssize_t bytes_received = 0;
+    size_t total_bytes_received = 0;
+
+    client_skt = create_socket();
+
+    addr.sin_family = AF_INET;
+    inet_pton(AF_INET, server_ip, &addr.sin_addr.s_addr);
+    addr.sin_port = htons(SERVER_PORT);
+
+    if (connect(client_skt, (struct sockaddr*) &addr, sizeof(addr)) != 0) {
+        perror("Unable to TCP connect to server");
+        goto exit_tcp;
+    } else {
+        printf("TCP connection to server successful\n");
+    }
+
+    struct timespec start, end;
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while ((bytes_received = recv(client_skt, buffer, BUFFER_SIZE, 0)) > 0) {
+        /*
+        size_t count = validate_online(buffer);
+        if (count) {
+            printf("Invalid count: %lu\n", count);
+        }
+        */
+        total_bytes_received += bytes_received;
+    }
+    clock_gettime(CLOCK_MONOTONIC, &end);
+
+    if (bytes_received < 0) {
+        ERR_print_errors_fp(stderr);
+    } else {
+        printf("Total bytes received : %ld\n", total_bytes_received);
+        measure_speed(total_bytes_received, start, end);
+    }
+
+exit_tcp:
+    if (client_skt != -1) {
+        close(client_skt);
+    }
+
+    free(buffer);
+    return NULL;
+}
+
+void* handle_tls(void *arg) {
+    char *server_ip = (char*)arg;
+    int client_skt = -1;
+    struct sockaddr_in addr;
 
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
+    fix_affinity(0);
 
     char *buffer = malloc(BUFFER_SIZE);
     if (buffer == NULL) {
@@ -187,8 +246,6 @@ void handle_connection(char *server_ip) {
             printf("Total bytes received : %ld\n", total_bytes_received);
             measure_speed(total_bytes_received, start, end);
         }
-
-        goto exit;
     } else {
         printf("SSL connection to server failed\n");
         ERR_print_errors_fp(stderr);
@@ -206,6 +263,7 @@ exit:
     }
 
     free(buffer);
+    return NULL;
 }
 
 int main(int argc, char* argv[]) {
@@ -217,23 +275,18 @@ int main(int argc, char* argv[]) {
     char *server_ip = argv[1];
     int num_connections = atoi(argv[2]);
 
-    fix_affinity(0);
+    pthread_t *tids = malloc(sizeof(pthread_t) * num_connections);
 
     for (int i = 0; i < num_connections; i++) {
-        pid_t pid = fork();
-
-        if (pid < 0) {
-            perror("Unable to fork");
+        if (pthread_create(&tids[i], NULL, handle_tcp, server_ip)) {
+            perror("pthread_create");
             exit(EXIT_FAILURE);
-        } else if (pid == 0) {  // Child process
-            handle_connection(server_ip);
-            exit(0);  // Child process exits
         }
     }
 
     // Parent process waits for all child processes to finish
     for (int i = 0; i < num_connections; i++) {
-        wait(NULL);
+        pthread_join(tids[i], NULL);
     }
 
     return 0;
