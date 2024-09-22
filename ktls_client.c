@@ -108,6 +108,17 @@ void fix_affinity(int cpu)
     }
 }
 
+size_t validate_online(char *buf)
+{
+    size_t count = 0;
+    for (int i = 0; i < BUFFER_SIZE; i++) {
+        if (buf[i] != 0) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
 void handle_connection(char *server_ip) {
     int client_skt = -1;
     struct sockaddr_in addr;
@@ -115,8 +126,6 @@ void handle_connection(char *server_ip) {
 
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
-
-    fix_affinity(0);
 
     char *buffer = malloc(BUFFER_SIZE);
     if (buffer == NULL) {
@@ -162,7 +171,12 @@ void handle_connection(char *server_ip) {
         struct timespec start, end;
         clock_gettime(CLOCK_MONOTONIC, &start);
         while ((bytes_received = SSL_read(ssl, buffer, BUFFER_SIZE)) > 0) {
-            // printf("Bytes received this chunk: %ld\n", bytes_received);
+            /*
+            size_t count = validate_online(buffer);
+            if (count) {
+                printf("Invalid count: %lu\n", count);
+            }
+            */
             total_bytes_received += bytes_received;
         }
         clock_gettime(CLOCK_MONOTONIC, &end);
@@ -202,6 +216,8 @@ int main(int argc, char* argv[]) {
 
     char *server_ip = argv[1];
     int num_connections = atoi(argv[2]);
+
+    fix_affinity(0);
 
     for (int i = 0; i < num_connections; i++) {
         pid_t pid = fork();
