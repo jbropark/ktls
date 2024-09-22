@@ -119,8 +119,7 @@ size_t validate_online(char *buf)
 }
 
 
-void* handle_tcp(void *arg) {
-    char *server_ip = (char*)arg;
+void handle_tcp(char *server_ip) {
     int client_skt = -1;
     struct sockaddr_in addr;
 
@@ -174,11 +173,9 @@ exit_tcp:
     }
 
     free(buffer);
-    return NULL;
 }
 
-void* handle_tls(void *arg) {
-    char *server_ip = (char*)arg;
+void handle_tls(char *server_ip) {
     int client_skt = -1;
     struct sockaddr_in addr;
 
@@ -206,7 +203,7 @@ void* handle_tls(void *arg) {
 
     if (connect(client_skt, (struct sockaddr*) &addr, sizeof(addr)) != 0) {
         perror("Unable to TCP connect to server");
-        goto exit;
+        goto exit_tls;
     } else {
         printf("TCP connection to server successful\n");
     }
@@ -214,13 +211,13 @@ void* handle_tls(void *arg) {
     ssl = SSL_new(ssl_ctx);
     if (SSL_set_fd(ssl, client_skt) <= 0) {
         ERR_print_errors_fp(stderr);
-        goto exit;
+        goto exit_tls;
     }
 
     SSL_set_tlsext_host_name(ssl, server_ip);
     if (!SSL_set1_host(ssl, server_ip)) {
         ERR_print_errors_fp(stderr);
-        goto exit;
+        goto exit_tls;
     }
 
     if (SSL_connect(ssl) == 1) {
@@ -251,7 +248,7 @@ void* handle_tls(void *arg) {
         ERR_print_errors_fp(stderr);
     }
 
-exit:
+exit_tls:
     if (ssl != NULL) {
         SSL_shutdown(ssl);
         SSL_free(ssl);
@@ -263,31 +260,17 @@ exit:
     }
 
     free(buffer);
-    return NULL;
 }
 
 int main(int argc, char* argv[]) {
-    if (argc != 3) {
-        fprintf(stderr, "Usage: %s <server_ip> <number_of_connections>\n", argv[0]);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <server_ip>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
     char *server_ip = argv[1];
-    int num_connections = atoi(argv[2]);
 
-    pthread_t *tids = malloc(sizeof(pthread_t) * num_connections);
-
-    for (int i = 0; i < num_connections; i++) {
-        if (pthread_create(&tids[i], NULL, handle_tcp, server_ip)) {
-            perror("pthread_create");
-            exit(EXIT_FAILURE);
-        }
-    }
-
-    // Parent process waits for all child processes to finish
-    for (int i = 0; i < num_connections; i++) {
-        pthread_join(tids[i], NULL);
-    }
+    handle_tls(server_ip);
 
     return 0;
 }

@@ -21,9 +21,7 @@
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
 static const int SERVER_PORT = 4433;
-static const int BUFFER_SIZE = 8931;
-
-static volatile bool server_running = true;
+static const int BUFFER_SIZE = 1024 * 1024;
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end)
 {
@@ -192,14 +190,17 @@ static void configure_server_context(SSL_CTX *ctx)
     SSL_CTX_set_verify_depth(ctx, 1);
 }
 
-void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer)
+void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t seconds, char *buffer)
 {
-    struct timespec start, end;
+    struct timespec start, end, now;
 
     ssize_t bytes_sent = 0;
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    for (size_t i = 0; i < n_packets; i++) {
+    end = start;
+    end.tv_sec += seconds;
+    now = start;
+    while (now.tv_sec <= end.tv_sec) {
         ssize_t sent = send(client_skt, buffer, BUFFER_SIZE, 0);
 
         if (sent <= 0) {
@@ -208,29 +209,28 @@ void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer
         }
 
         bytes_sent += sent;
+        clock_gettime(CLOCK_MONOTONIC, &now);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 
     if (bytes_sent > 0) {
         measure_speed(bytes_sent, start, end);
     }
-
-    close(client_skt);
 }
 
-void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer)
+void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t seconds, char *buffer)
 {
     SSL *ssl = SSL_new(ssl_ctx);
-    struct timespec start, end;
+    struct timespec start, end, now;
 
     if (SSL_set_fd(ssl, client_skt) == 0) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        return;
     }
 
     if (SSL_accept(ssl) <= 0) {
         ERR_print_errors_fp(stderr);
-        exit(EXIT_FAILURE);
+        return;
     }
 
     printf("Client SSL connection accepted\n");
@@ -246,7 +246,10 @@ void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer
     ssize_t bytes_sent = 0;
 
     clock_gettime(CLOCK_MONOTONIC, &start);
-    for (size_t i = 0; i < n_packets; i++) {
+    end = start;
+    end.tv_sec += seconds;
+    now = start;
+    while (now.tv_sec <= end.tv_sec) {
         ssize_t sent = SSL_write(ssl, buffer, BUFFER_SIZE);
 
         if (sent <= 0) {
@@ -255,6 +258,7 @@ void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer
         }
 
         bytes_sent += sent;
+        clock_gettime(CLOCK_MONOTONIC, &now);
     }
     clock_gettime(CLOCK_MONOTONIC, &end);
 
@@ -264,33 +268,33 @@ void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t n_packets, char *buffer
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
-    close(client_skt);
 }
 
-int server_skt = -1;
+static bool volatile server_running = true;
 
-void quit_server(int sig)
-{
+void handle_sigint(int sig) {
     server_running = false;
-    close(server_skt);
-    server_skt = -1;
 }
 
 int main(int argc, char **argv)
 {
     if (argc != 2) {
-        fprintf(stderr, "Usage: %s <n_packets>\n", argv[0]);
+        fprintf(stderr, "Usage: %s <seconds>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    size_t n_packets = strtoull(argv[1], NULL, 10);
-
+    size_t seconds = strtoull(argv[1], NULL, 10);
+    
     int client_skt = -1;
     struct sockaddr_in addr;
     unsigned int addr_len = sizeof(addr);
 
     signal(SIGPIPE, SIG_IGN);
-    signal(SIGINT, quit_server);
+
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, NULL);
 
     SSL_CTX *ssl_ctx = NULL;
 
@@ -311,42 +315,39 @@ int main(int argc, char **argv)
     SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_2_VERSION);
     configure_server_context(ssl_ctx);
 
-    server_skt = create_socket();
+    int server_skt = create_socket();
+
+    const int enable = 1;
+    if (setsockopt(server_skt, SOL_SOCKET, SO_REUSEADDR, &enable, sizeof(int)) < 0) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
+    }
+    if (setsockopt(server_skt, SOL_SOCKET, SO_REUSEPORT, &enable, sizeof(int)) < 0) {
+        perror("setsockopt failed");
+        exit(EXIT_FAILURE);
+    }
 
     while (server_running) {
         client_skt = accept(server_skt, (struct sockaddr *)&addr, &addr_len);
         if (client_skt < 0) {
-            perror("Unable to accept");
-            exit(EXIT_FAILURE);
+            if (errno == EINTR) {
+                printf("Got interrupt\n");
+                continue;
+            }
+            perror("accept");
+            break;
         }
 
         printf("Client TCP connection accepted\n");
         printf("Client IP: %s\n", inet_ntoa(addr.sin_addr));
-        pid_t pid = fork();
 
-        if (pid < 0) {
-            perror("Fork failed");
-            close(client_skt);
-            continue;
-        }
+        handle_tls(ssl_ctx, client_skt, seconds, buffer);
 
-        // Close the client socket in the server process
-        if (pid != 0) {
-            close(client_skt);
-            continue;
-        }
-
-        // Close the server socket in the child process
-        if (server_skt != -1) {
-            close(server_skt);
-        }
-
-        handle_tcp(ssl_ctx, client_skt, n_packets, buffer);
-
-        exit(0); // Child process exits
+        close(client_skt);
     }
 
     printf("Server exiting...\n");
+    close(server_skt);
     SSL_CTX_free(ssl_ctx);
     free(buffer);
 
