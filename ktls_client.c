@@ -18,7 +18,6 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
-static const int SERVER_PORT = 4433;
 static const size_t BUFFER_SIZE = 1 * 1024 * 1024;
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end) {
@@ -119,7 +118,7 @@ size_t validate_online(char *buf)
 }
 
 
-void handle_tcp(char *server_ip) {
+void handle_tcp(char *server_ip, int port) {
     int client_skt = -1;
     struct sockaddr_in addr;
 
@@ -138,7 +137,7 @@ void handle_tcp(char *server_ip) {
 
     addr.sin_family = AF_INET;
     inet_pton(AF_INET, server_ip, &addr.sin_addr.s_addr);
-    addr.sin_port = htons(SERVER_PORT);
+    addr.sin_port = htons(port);
 
     if (connect(client_skt, (struct sockaddr*) &addr, sizeof(addr)) != 0) {
         perror("Unable to TCP connect to server");
@@ -175,7 +174,7 @@ exit_tcp:
     free(buffer);
 }
 
-void handle_tls(char *server_ip) {
+void handle_tls(char *server_ip, int port) {
     int client_skt = -1;
     struct sockaddr_in addr;
 
@@ -199,7 +198,7 @@ void handle_tls(char *server_ip) {
 
     addr.sin_family = AF_INET;
     inet_pton(AF_INET, server_ip, &addr.sin_addr.s_addr);
-    addr.sin_port = htons(SERVER_PORT);
+    addr.sin_port = htons(port);
 
     if (connect(client_skt, (struct sockaddr*) &addr, sizeof(addr)) != 0) {
         perror("Unable to TCP connect to server");
@@ -262,15 +261,52 @@ exit_tls:
     free(buffer);
 }
 
-int main(int argc, char* argv[]) {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <server_ip>\n", argv[0]);
+void help(char *name)
+{
+    fprintf(stderr, "Usage: %s <host> -h -p port -s\n", name);
+}
+
+int main(int argc, char* argv[])
+{
+    char *server_ip = NULL;
+    int port = 12345;
+    int opt_ok = 1;
+    int tls = 0;
+    int opt;
+
+    while((opt = getopt(argc, argv, "hsp:")) != -1) {
+        switch(opt) {
+            case 'h':
+                opt_ok = 0;
+                break;
+            case 's':
+                tls = 1;
+                break;
+            case 'p':
+                port = atoi(optarg);
+                break;
+        }
+    }
+
+    if (opt_ok != 1) {
+        help(argv[0]);
+        exit(0);
+    }
+
+    if (optind < argc) {
+        server_ip = argv[optind];
+    } else {
+        help(argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    char *server_ip = argv[1];
+    printf("Connect to %s:%d (%s)\n", server_ip, port, tls ? "TLS" : "TCP");
 
-    handle_tls(server_ip);
+    if (tls) {
+        handle_tls(server_ip, port);
+    } else {
+        handle_tcp(server_ip, port);
+    }
 
     return 0;
 }

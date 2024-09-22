@@ -20,8 +20,8 @@
 
 #define MIN(x, y) ((x) < (y) ? (x) : (y))
 
-static const int SERVER_PORT = 4433;
 static const int BUFFER_SIZE = 1024 * 1024;
+
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end)
 {
@@ -113,7 +113,7 @@ void enable_ktls(SSL *ssl, int socket)
     }
 }
 
-int create_socket()
+int create_socket(int port)
 {
     int s;
     struct sockaddr_in addr;
@@ -131,7 +131,7 @@ int create_socket()
     }
 
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(SERVER_PORT);
+    addr.sin_port = htons(port);
     addr.sin_addr.s_addr = INADDR_ANY;
 
     if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
@@ -196,7 +196,7 @@ static void configure_server_context(SSL_CTX *ctx)
     SSL_CTX_set_verify_depth(ctx, 1);
 }
 
-void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t seconds, char *buffer)
+void handle_tcp(int client_skt, int seconds, char *buffer)
 {
     struct timespec start, end, now;
 
@@ -224,7 +224,7 @@ void handle_tcp(SSL_CTX *ssl_ctx, int client_skt, size_t seconds, char *buffer)
     }
 }
 
-void handle_tls(SSL_CTX *ssl_ctx, int client_skt, size_t seconds, char *buffer)
+void handle_tls(SSL_CTX *ssl_ctx, int client_skt, int seconds, char *buffer)
 {
     SSL *ssl = SSL_new(ssl_ctx);
     struct timespec start, end, now;
@@ -282,14 +282,39 @@ void handle_sigint(int sig) {
     server_running = false;
 }
 
+void help(char *name) {
+    fprintf(stderr, "Usage: %s -h -p port -t seconds -s\n", name);
+}
+
 int main(int argc, char **argv)
 {
-    if (argc != 2) {
-        fprintf(stderr, "Usage: %s <seconds>\n", argv[0]);
-        exit(EXIT_FAILURE);
+    int port = 12345;
+    int seconds = 10;
+    int opt_ok = 1;
+    int tls = 0;
+    int opt;
+
+    while((opt = getopt(argc, argv, "hsp:t:")) != -1) { 
+        switch(opt) {
+            case 'h':
+                opt_ok = 0;
+                break;
+            case 's':
+                tls = 1;
+                break;
+            case 'p':
+                port = atoi(optarg);
+                break;
+            case 't':
+                seconds = atoi(optarg);
+                break;
+        }
     }
 
-    size_t seconds = strtoull(argv[1], NULL, 10);
+    if (opt_ok != 1) {  
+        help(argv[0]);
+        exit(0);
+    }
     
     int client_skt = -1;
     struct sockaddr_in addr;
@@ -310,7 +335,7 @@ int main(int argc, char **argv)
         exit(EXIT_FAILURE);
     }
 
-    printf("Server start running\n\n");
+    printf("Server start running (port=%d; seconds=%d; %s)\n", port, seconds, tls ? "TLS" : "TCP");
 
     SSL_library_init();
     OpenSSL_add_all_algorithms();
@@ -321,7 +346,7 @@ int main(int argc, char **argv)
     SSL_CTX_set_max_proto_version(ssl_ctx, TLS1_2_VERSION);
     configure_server_context(ssl_ctx);
 
-    int server_skt = create_socket();
+    int server_skt = create_socket(port);
 
     while (server_running) {
         client_skt = accept(server_skt, (struct sockaddr *)&addr, &addr_len);
@@ -337,7 +362,11 @@ int main(int argc, char **argv)
         printf("Client TCP connection accepted\n");
         printf("Client IP: %s\n", inet_ntoa(addr.sin_addr));
 
-        handle_tls(ssl_ctx, client_skt, seconds, buffer);
+        if (tls) {
+            handle_tls(ssl_ctx, client_skt, seconds, buffer);
+        } else {
+            handle_tcp(client_skt, seconds, buffer);
+        }
 
         close(client_skt);
     }
