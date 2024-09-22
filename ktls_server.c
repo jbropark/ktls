@@ -17,9 +17,10 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 
+#define MIN(x, y) ((x) < (y) ? (x) : (y))
+
 static const int SERVER_PORT = 4433;
 static const int BUFFER_SIZE = 8931;
-static const int MAX_SIZE = 1 * 1024 * 1024 * 1024; // 1GB
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end)
 {
@@ -117,8 +118,7 @@ int create_socket()
     struct sockaddr_in addr;
 
     s = socket(AF_INET, SOCK_STREAM, 0);
-    if (s < 0)
-    {
+    if (s < 0) {
         perror("Unable to create socket");
         exit(1);
     }
@@ -127,14 +127,12 @@ int create_socket()
     addr.sin_port = htons(SERVER_PORT);
     addr.sin_addr.s_addr = INADDR_ANY;
 
-    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0)
-    {
+    if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
         perror("Unable to bind");
         exit(1);
     }
 
-    if (listen(s, 10000) < 0)
-    {
+    if (listen(s, 10000) < 0) {
         perror("Unable to listen");
         exit(1);
     }
@@ -143,13 +141,13 @@ int create_socket()
 }
 
 void SSL_CTX_keylog_cb(const SSL *ssl, const char *line) {
-	FILE *log_file = fopen(getenv("SSLKEYLOGFILE"), "a");
-	if (log_file != NULL) {
-		fprintf(log_file, "%s\n", line);
-		fclose(log_file);
-	} else {
-		perror("Unable to open key log file");
-	}
+    FILE *log_file = fopen(getenv("SSLKEYLOGFILE"), "a");
+    if (log_file != NULL) {
+        fprintf(log_file, "%s\n", line);
+        fclose(log_file);
+    } else {
+        perror("Unable to open key log file");
+    }
 }
 
 static SSL_CTX *create_context()
@@ -160,8 +158,7 @@ static SSL_CTX *create_context()
     method = SSLv23_server_method();
 
     ctx = SSL_CTX_new(method);
-    if (ctx == NULL)
-    {
+    if (ctx == NULL) {
         perror("Unable to create SSL context");
         ERR_print_errors_fp(stderr);
         exit(1);
@@ -173,20 +170,17 @@ static SSL_CTX *create_context()
 
 static void configure_server_context(SSL_CTX *ctx)
 {
-    if (SSL_CTX_use_certificate_chain_file(ctx, "./server-cert.pem") <= 0)
-    {
+    if (SSL_CTX_use_certificate_chain_file(ctx, "./server-cert.pem") <= 0) {
         ERR_print_errors_fp(stderr);
         exit(1);
     }
 
-    if (SSL_CTX_use_PrivateKey_file(ctx, "./server-key.pem", SSL_FILETYPE_PEM) <= 0)
-    {
+    if (SSL_CTX_use_PrivateKey_file(ctx, "./server-key.pem", SSL_FILETYPE_PEM) <= 0) {
         ERR_print_errors_fp(stderr);
         exit(1);
     }
 
-    if (!SSL_CTX_load_verify_locations(ctx, "./ca-cert.pem", NULL))
-    {
+    if (!SSL_CTX_load_verify_locations(ctx, "./ca-cert.pem", NULL)) {
         ERR_print_errors_fp(stderr);
         exit(1);
     }
@@ -197,13 +191,12 @@ static void configure_server_context(SSL_CTX *ctx)
 
 int main(int argc, char **argv)
 {
-    if (argc != 2)
-    {
-        fprintf(stderr, "Usage: %s <total_bytes_to_send>\n", argv[0]);
+    if (argc != 2) {
+        fprintf(stderr, "Usage: %s <n_packets>\n", argv[0]);
         exit(EXIT_FAILURE);
     }
 
-    size_t total_bytes_to_send = strtoull(argv[1], NULL, 10);
+    size_t n_packets = strtoull(argv[1], NULL, 10);
 
     static volatile bool server_running = true;
     int server_skt = -1;
@@ -215,32 +208,12 @@ int main(int argc, char **argv)
     SSL *ssl = NULL;
 
     ssize_t bytes_sent = 0;
-    size_t bytes_remaining = total_bytes_to_send;
     long long int remain_size; // remaining size at send socket buffer
     struct timespec start, end;
 
-    int file = open("files/1g", O_RDONLY);
-    if (file < 0)
-    {
-        perror("failed to open written file");
-        exit(EXIT_FAILURE);
-    }
-
-    int *buffer = (int *)malloc(sizeof(int) * MAX_SIZE);
-    if (buffer == NULL)
-    {
+    char *buffer = (char *)calloc(sizeof(char), BUFFER_SIZE);
+    if (buffer == NULL) {
         perror("Memory allocation error");
-        exit(EXIT_FAILURE);
-    }
-
-    memset(buffer, 0, MAX_SIZE);
-    struct stat file_stat;
-    fstat(file, &file_stat);
-
-    int read_size = read(file, buffer, file_stat.st_size);
-    if (read_size < 0)
-    {
-        perror("Failed to read from file");
         exit(EXIT_FAILURE);
     }
 
@@ -257,11 +230,9 @@ int main(int argc, char **argv)
 
     server_skt = create_socket();
 
-    while (server_running)
-    {
+    while (server_running) {
         client_skt = accept(server_skt, (struct sockaddr *)&addr, &addr_len);
-        if (client_skt < 0)
-        {
+        if (client_skt < 0) {
             perror("Unable to accept");
             exit(EXIT_FAILURE);
         }
@@ -269,78 +240,65 @@ int main(int argc, char **argv)
         printf("Client TCP connection accepted\n");
         printf("Client IP: %s\n", inet_ntoa(addr.sin_addr));
         pid_t pid = fork();
-        if (pid < 0)
-        {
+
+        if (pid < 0) {
             perror("Fork failed");
             close(client_skt);
             continue;
         }
 
-        if (pid == 0)
-        {                      // Child process
-            close(server_skt); // Close the server socket in the child process
-
-            ssl = SSL_new(ssl_ctx);
-            if (SSL_set_fd(ssl, client_skt) == 0)
-            {
-                ERR_print_errors_fp(stderr);
-                exit(EXIT_FAILURE);
-            }
-
-            if (SSL_accept(ssl) <= 0)
-            {
-                ERR_print_errors_fp(stderr);
-                exit(EXIT_FAILURE);
-            }
-            else
-            {
-                printf("Client SSL connection accepted\n");
-                int version = SSL_version(ssl);
-                const char *version_str = SSL_get_version(ssl);
-
-                printf("TLS Version: %s\n", version_str);
-
-                const char *cipher_suite = SSL_get_cipher(ssl);
-                printf("Cipher Suite: %s\n", cipher_suite);
-
-                enable_ktls(ssl, client_skt);
-
-                clock_gettime(CLOCK_MONOTONIC, &start);
-                while (bytes_remaining > 0)
-                {
-                    ssize_t to_send = bytes_remaining > BUFFER_SIZE ? BUFFER_SIZE : bytes_remaining;
-
-                    //ssize_t sent = write(client_skt, buffer, to_send);
-                    //ssize_t sent = write(client_skt, buffer, bytes_remaining);
-                    ssize_t sent = SSL_write(ssl, buffer, to_send);
-
-                    if (sent <= 0)
-                    {
-                        perror("write failed");
-                        break;
-                    }
-
-                    bytes_sent += sent;
-                    bytes_remaining -= sent;
-                    // usleep(2);
-                }
-                clock_gettime(CLOCK_MONOTONIC, &end);
-
-                if (bytes_sent > 0)
-                {
-                    measure_speed(bytes_sent, start, end);
-                }
-            }
-
-            SSL_shutdown(ssl);
-            SSL_free(ssl);
+        // Close the client socket in the server process
+        if (pid != 0) {
             close(client_skt);
-            exit(0); // Child process exits
+            continue;
         }
-        else
-        {                      // Parent process
-            close(client_skt); // Parent closes its copy of the client socket
+
+        // Close the server socket in the child process
+        close(server_skt);
+
+        ssl = SSL_new(ssl_ctx);
+        if (SSL_set_fd(ssl, client_skt) == 0) {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
         }
+
+        if (SSL_accept(ssl) <= 0) {
+            ERR_print_errors_fp(stderr);
+            exit(EXIT_FAILURE);
+        }
+
+        printf("Client SSL connection accepted\n");
+        int version = SSL_version(ssl);
+        const char *version_str = SSL_get_version(ssl);
+
+        printf("TLS Version: %s\n", version_str);
+
+        const char *cipher_suite = SSL_get_cipher(ssl);
+        printf("Cipher Suite: %s\n", cipher_suite);
+
+        enable_ktls(ssl, client_skt);
+
+        clock_gettime(CLOCK_MONOTONIC, &start);
+        for (size_t i = 0; i < n_packets; i++) {
+            ssize_t sent = SSL_write(ssl, buffer, BUFFER_SIZE);
+
+            if (sent <= 0) {
+                perror("write failed");
+                break;
+            }
+
+            bytes_sent += sent;
+        }
+        clock_gettime(CLOCK_MONOTONIC, &end);
+
+        if (bytes_sent > 0) {
+            measure_speed(bytes_sent, start, end);
+        }
+
+        SSL_shutdown(ssl);
+        SSL_free(ssl);
+        close(client_skt);
+        exit(0); // Child process exits
     }
 
     printf("Server exiting...\n");
