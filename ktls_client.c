@@ -23,6 +23,7 @@ static const size_t BUFFER_SIZE = 1 * 1024 * 1024;
 struct targ {
     char *server_ip;
     int port;
+    int affinity;
 };
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end) {
@@ -90,6 +91,11 @@ int fix_affinity(int cpu)
 {
     cpu_set_t cpuset;
 
+    if (cpu < 0) {
+        printf("No affinity\n");
+        return 0;
+    }
+
     CPU_ZERO(&cpuset);
     CPU_SET(cpu, &cpuset);
 
@@ -99,6 +105,8 @@ int fix_affinity(int cpu)
         perror("affinity");
         return -1;
     }
+
+    printf("Fix affinity: %d\n", cpu);
 
     return 0;
 }
@@ -118,10 +126,11 @@ size_t validate_online(char *buf)
 void* handle_tcp(void *arg) {
     char *server_ip = ((struct targ*)arg)->server_ip;
     int port = ((struct targ*)arg)->port;
+    int affinity = ((struct targ*)arg)->affinity;
     int client_skt = -1;
     struct sockaddr_in addr;
 
-    fix_affinity(1);
+    fix_affinity(affinity);
 
     char *buffer = malloc(BUFFER_SIZE);
     if (buffer == NULL) {
@@ -177,12 +186,13 @@ exit_tcp:
 void* handle_tls(void *arg) {
     char *server_ip = ((struct targ*)arg)->server_ip;
     int port = ((struct targ*)arg)->port;
+    int affinity = ((struct targ*)arg)->affinity;
     int client_skt = -1;
     struct sockaddr_in addr;
-
     SSL_CTX *ssl_ctx = NULL;
     SSL *ssl = NULL;
-    fix_affinity(0);
+
+    fix_affinity(affinity);
 
     char *buffer = malloc(BUFFER_SIZE);
     if (buffer == NULL) {
@@ -276,9 +286,10 @@ int main(int argc, char* argv[])
     int opt_ok = 1;
     int tls = 0;
     int connections = 1;
+    int affinity = -1;
     int opt;
 
-    while((opt = getopt(argc, argv, "hsp:n:")) != -1) {
+    while((opt = getopt(argc, argv, "hsp:n:a:")) != -1) {
         switch(opt) {
             case 'h':
                 opt_ok = 0;
@@ -288,6 +299,9 @@ int main(int argc, char* argv[])
                 break;
             case 'p':
                 port = atoi(optarg);
+                break;
+            case 'a':
+                affinity = atoi(optarg);
                 break;
             case 'n':
                 connections = atoi(optarg);
@@ -313,6 +327,7 @@ int main(int argc, char* argv[])
     for (int i = 0; i < connections; i++) {
         targs[i].server_ip = server_ip;
         targs[i].port = port;
+        targs[i].affinity = affinity;
         if (tls) {
             pthread_create(&tids[i], NULL, handle_tls, &targs[i]);
         } else {
