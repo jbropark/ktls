@@ -26,20 +26,10 @@ struct targ {
 };
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end) {
-    // double elapsed_time_sec, elapsed_time_ms, elapsed_time_us;
-    // double speed_mbps;
+    double elapsed_time = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
+    double bitrate = ((bytes_sent * 8) / 1e9) / elapsed_time;
 
-    double elapsed_time_sec = (end.tv_sec - start.tv_sec) + (end.tv_nsec - start.tv_nsec) / 1e9;
-    double elapsed_time_ms = elapsed_time_sec * 1000;
-    // elapsed_time_us = elapsed_time_sec * 1e6;
-
-    // speed_mbps = ((bytes_sent * 8) / 1000000.0) / elapsed_time_sec;
-
-    // printf("Total data sent: %zd bytes\n", bytes_sent);
-    // printf("Elapsed time: %.6f seconds\n", elapsed_time_sec);
-    printf("Elapsed time: %.6f milliseconds\n", elapsed_time_ms);
-    // printf("Elapsed time: %.6f microseconds\n", elapsed_time_us);
-    // printf("Speed: %.6f Mbps\n", speed_mbps);
+    printf("Received: %ld bytes, %.4f seconds, %.1f Gbps\n", bytes_sent, elapsed_time, bitrate);
 }
 
 int create_socket() {
