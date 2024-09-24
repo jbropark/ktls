@@ -20,6 +20,11 @@
 
 static const size_t BUFFER_SIZE = 1 * 1024 * 1024;
 
+struct targ {
+    char *server_ip;
+    int port;
+};
+
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end) {
     // double elapsed_time_sec, elapsed_time_ms, elapsed_time_us;
     // double speed_mbps;
@@ -91,19 +96,21 @@ static void configure_client_context(SSL_CTX *ctx) {
     }
 }
 
-void fix_affinity(int cpu)
+int fix_affinity(int cpu)
 {
     cpu_set_t cpuset;
-    pthread_t thread;
 
     CPU_ZERO(&cpuset);
     CPU_SET(cpu, &cpuset);
 
-    thread = pthread_self();
+    pthread_t thread = pthread_self();
 
     if (pthread_setaffinity_np(thread, sizeof(cpu_set_t), &cpuset)) {
         perror("affinity");
+        return -1;
     }
+
+    return 0;
 }
 
 size_t validate_online(char *buf)
@@ -118,11 +125,13 @@ size_t validate_online(char *buf)
 }
 
 
-void handle_tcp(char *server_ip, int port) {
+void* handle_tcp(void *arg) {
+    char *server_ip = ((struct targ*)arg)->server_ip;
+    int port = ((struct targ*)arg)->port;
     int client_skt = -1;
     struct sockaddr_in addr;
 
-    fix_affinity(0);
+    fix_affinity(1);
 
     char *buffer = malloc(BUFFER_SIZE);
     if (buffer == NULL) {
@@ -148,7 +157,7 @@ void handle_tcp(char *server_ip, int port) {
 
     struct timespec start, end;
     clock_gettime(CLOCK_MONOTONIC, &start);
-    while ((bytes_received = recv(client_skt, buffer, BUFFER_SIZE, 0)) > 0) {
+    while ((bytes_received = read(client_skt, buffer, BUFFER_SIZE)) > 0) {
         /*
         size_t count = validate_online(buffer);
         if (count) {
@@ -172,9 +181,12 @@ exit_tcp:
     }
 
     free(buffer);
+    return NULL;
 }
 
-void handle_tls(char *server_ip, int port) {
+void* handle_tls(void *arg) {
+    char *server_ip = ((struct targ*)arg)->server_ip;
+    int port = ((struct targ*)arg)->port;
     int client_skt = -1;
     struct sockaddr_in addr;
 
@@ -259,6 +271,7 @@ exit_tls:
     }
 
     free(buffer);
+    return NULL;
 }
 
 void help(char *name)
@@ -272,9 +285,10 @@ int main(int argc, char* argv[])
     int port = 12345;
     int opt_ok = 1;
     int tls = 0;
+    int connections = 1;
     int opt;
 
-    while((opt = getopt(argc, argv, "hsp:")) != -1) {
+    while((opt = getopt(argc, argv, "hsp:n:")) != -1) {
         switch(opt) {
             case 'h':
                 opt_ok = 0;
@@ -284,6 +298,9 @@ int main(int argc, char* argv[])
                 break;
             case 'p':
                 port = atoi(optarg);
+                break;
+            case 'n':
+                connections = atoi(optarg);
                 break;
         }
     }
@@ -301,11 +318,20 @@ int main(int argc, char* argv[])
     }
 
     printf("Connect to %s:%d (%s)\n", server_ip, port, tls ? "TLS" : "TCP");
+    pthread_t *tids = malloc(sizeof(pthread_t) * connections);
+    struct targ *targs = malloc(sizeof(struct targ) * connections);
+    for (int i = 0; i < connections; i++) {
+        targs[i].server_ip = server_ip;
+        targs[i].port = port;
+        if (tls) {
+            pthread_create(&tids[i], NULL, handle_tls, &targs[i]);
+        } else {
+            pthread_create(&tids[i], NULL, handle_tcp, &targs[i]);
+        }
+    }
 
-    if (tls) {
-        handle_tls(server_ip, port);
-    } else {
-        handle_tcp(server_ip, port);
+    for (int i = 0; i < connections; i++) {
+        pthread_join(tids[i], NULL);
     }
 
     return 0;

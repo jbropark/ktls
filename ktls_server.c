@@ -22,6 +22,12 @@
 
 static const int BUFFER_SIZE = 1024 * 1024;
 
+struct targ {
+    SSL_CTX *ctx;
+    int sockfd;
+    int seconds;
+    char *buffer;
+};
 
 void measure_speed(size_t bytes_sent, struct timespec start, struct timespec end)
 {
@@ -196,8 +202,14 @@ static void configure_server_context(SSL_CTX *ctx)
     SSL_CTX_set_verify_depth(ctx, 1);
 }
 
-void handle_tcp(int client_skt, int seconds, char *buffer)
+void* handle_tcp(void *arg)
 {
+    int client_skt = ((struct targ*)arg)->sockfd;
+    int seconds = ((struct targ*)arg)->seconds;
+    char *buffer = ((struct targ*)arg)->buffer;
+
+    free(arg);
+
     struct timespec start, end, now;
 
     ssize_t bytes_sent = 0;
@@ -207,7 +219,7 @@ void handle_tcp(int client_skt, int seconds, char *buffer)
     end.tv_sec += seconds;
     now = start;
     while (now.tv_sec <= end.tv_sec) {
-        ssize_t sent = send(client_skt, buffer, BUFFER_SIZE, 0);
+        ssize_t sent = write(client_skt, buffer, BUFFER_SIZE);
 
         if (sent <= 0) {
             perror("write failed");
@@ -222,21 +234,29 @@ void handle_tcp(int client_skt, int seconds, char *buffer)
     if (bytes_sent > 0) {
         measure_speed(bytes_sent, start, end);
     }
+    return NULL;
 }
 
-void handle_tls(SSL_CTX *ssl_ctx, int client_skt, int seconds, char *buffer)
+void* handle_tls(void *arg)
 {
+    SSL_CTX *ssl_ctx = ((struct targ*)arg)->ctx;
+    int client_skt = ((struct targ*)arg)->sockfd;
+    int seconds = ((struct targ*)arg)->seconds;
+    char *buffer = ((struct targ*)arg)->buffer;
+
+    free(arg);
+
     SSL *ssl = SSL_new(ssl_ctx);
     struct timespec start, end, now;
 
     if (SSL_set_fd(ssl, client_skt) == 0) {
         ERR_print_errors_fp(stderr);
-        return;
+        return NULL;
     }
 
     if (SSL_accept(ssl) <= 0) {
         ERR_print_errors_fp(stderr);
-        return;
+        return NULL;
     }
 
     printf("Client SSL connection accepted\n");
@@ -274,6 +294,8 @@ void handle_tls(SSL_CTX *ssl_ctx, int client_skt, int seconds, char *buffer)
 
     SSL_shutdown(ssl);
     SSL_free(ssl);
+
+    return NULL;
 }
 
 static bool volatile server_running = true;
@@ -362,10 +384,17 @@ int main(int argc, char **argv)
         printf("Client TCP connection accepted\n");
         printf("Client IP: %s\n", inet_ntoa(addr.sin_addr));
 
+        struct targ *arg = malloc(sizeof(struct targ));
+        arg->ctx = ssl_ctx;
+        arg->sockfd = client_skt;
+        arg->seconds = seconds;
+        arg->buffer = buffer;
+        pthread_t tid;
+
         if (tls) {
-            handle_tls(ssl_ctx, client_skt, seconds, buffer);
+            pthread_create(&tid, NULL, handle_tls, arg);
         } else {
-            handle_tcp(client_skt, seconds, buffer);
+            pthread_create(&tid, NULL, handle_tcp, arg);
         }
 
         close(client_skt);
